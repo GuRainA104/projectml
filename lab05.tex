@@ -1,0 +1,761 @@
+\documentclass[UTF8]{ctexart}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{hyperref}
+\usepackage{ctex}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{appendix}
+
+\geometry{a4paper,scale=0.8}
+\lstset{
+    numbers=left, %设置行号位置
+    numberstyle=\tiny, %设置行号大小
+    keywordstyle=\color{blue}, %设置关键字颜色
+    commentstyle=\color[cmyk]{1,0,1,0}, %设置注释颜色
+    frame=single, %设置边框格式
+    escapeinside=``, %逃逸字符(1左面的键)，用于显示中文
+    breaklines, %自动折行
+    extendedchars=false, %解决代码跨页时，章节标题，页眉等汉字不显示的问题
+    xleftmargin=2em,xrightmargin=2em, aboveskip=1em, %设置边距
+    tabsize=4, %设置tab空格数
+    showspaces=false %不显示空格
+    }
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black
+}
+\title{机器学习\\小组作业 集成电路设计}
+\author{张金钊 \ 徐子飞 \ 史习恩}
+\date{\today}
+
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+ 
+\tableofcontents
+\section{任务1: 逻辑综合评价预测}
+\subsection{提取AIG文件以及评价计算}
+这里我们按照实例所示代码进行尝试，定义logicSynthesis()函数用于读取AIG文件,
+\begin{lstlisting}[language=python]
+    import os
+    import re
+    import abc_py
+    import pickle
+    
+    def logicSynthesis(state):
+        # 1. 从状态字符串中提取电路名称和合成操作序列
+        circuitName, actions = state.split('_')
+        
+        # 2. 构建电路文件路径和库文件路径
+        circuitPath = f'/home/genshinmaster/project/InitialAIG/train/{circuitName}.aig'
+        libFile = '/home/genshinmaster/project/lib/7nm/7nm.lib'
+        logFile = f'{circuitName}.log'
+        nextState=f'/home/genshinmaster/yosys/AIGFiles/{state}.aig' # 当前AIG文件
+        
+        # 3. 定义合成操作与Yosys命令的映射
+        synthesisOpToPosDic = {
+            0: "refactor",
+            1: "refactor -z",
+            2: "rewrite",
+            3: "rewrite -z",
+            4: "resub",
+            5: "resub -z",
+            6: "balance"
+        }
+        
+      
+       # 4. 构建Yosys命令序列
+        action_cmd = ''
+        for digit in actions:
+            if digit.isdigit():
+                operation = int(digit)
+                if operation in synthesisOpToPosDic:
+                    action_cmd += f"{synthesisOpToPosDic[operation]}; "
+                else:
+                    print(f"Warning: Operation {operation} not found in the dictionary.")
+        
+        
+        # 5. 执行Yosys命令
+        abcRunCmd = f"./yosys-abc -c \"read {circuitPath}; {action_cmd}; read_lib {libFile}; write {nextState}; print_stats\" > {logFile}"
+        
+        os.system(abcRunCmd)
+         
+    
+    def evaluate_aig(aig_file, lib_file,log_file):
+        """
+        评估 AIG 文件的优劣
+        
+        参数:
+        aig_file (str): AIG 文件路径
+        lib_file (str): 库文件路径
+        
+        返回:
+        float: 优化后电路的面积延迟积相对于基准电路的改善比例
+        """
+        next_state = "aig_optimized.aig"
+        next_bench = "aig_optimized.bench"
+    
+        # 步骤 1: 使用 ABC 工具评估初始 AIG 文件
+        abcRunCmd = f"./yosys-abc -c \"read {aig_file}; read_lib {lib_file}; map; topo; stime\" > {log_file}"
+        os.system(abcRunCmd)
+    
+        with open(log_file) as f:
+            area_information = re.findall(r'[a-zA-Z0-9.]+', f.readlines()[-1])
+            baseline = float(area_information[-9]) * float(area_information[-4])
+    
+        # 步骤 2: 使用 RESYN2 优化 AIG 文件
+        RESYN2_CMD = "balance; rewrite; refactor; balance; rewrite; rewrite -z; balance; refactor -z; rewrite -z; balance;"
+        abcRunCmd = f"./yosys-abc -c \"read {aig_file}; {RESYN2_CMD} read_lib {lib_file}; write {next_state}; write_bench -l {next_bench}; map; topo; stime\" > {log_file}"
+        os.system(abcRunCmd)
+    
+        with open(log_file) as f:
+            area_information = re.findall(r'[a-zA-Z0-9.]+', f.readlines()[-1])
+        optimized = float(area_information[-9]) * float(area_information[-4])
+    
+        # 计算优化后电路的面积延迟积相对于基准电路的改善比例
+        eval = 1 - optimized / baseline
+        return eval
+    
+    data_dir = '/home/genshinmaster/project/project_data'
+    
+    for filename in os.listdir(data_dir):
+        if filename.endswith('.pkl'):
+            file_path = os.path.join(data_dir, filename)
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+                if data:
+                    logicSynthesis(data['input'][-1])
+    # 调用函数进行逻辑合成
+               
+\end{lstlisting} 
+
+
+\subsection{获取AIG的data表示}
+我们按照示例代码实现try3.py，用于读取AIG文件对应的data字典，
+\begin{lstlisting}
+    import abc_py
+    import numpy as np
+    import torch
+    
+    def read_aig(state):
+        """
+        读取AIG文件并返回表示AIG的data字典
+        """
+        _abc = abc_py.AbcInterface()
+        _abc.start()
+        _abc.read(state)
+    
+        data = {}
+        numNodes = _abc.numNodes()
+        data['node_type'] = np.zeros(numNodes, dtype=int)
+        data['num_inverted_predecessors'] = np.zeros(numNodes, dtype=int)
+    
+        edge_src_index = []
+        edge_target_index = []
+    
+        for nodeIdx in range(numNodes):
+            aigNode = _abc.aigNode(nodeIdx)
+            nodeType = aigNode.nodeType()
+            data['num_inverted_predecessors'][nodeIdx] = 0
+    
+            if nodeType == 0 or nodeType == 2:
+                data['node_type'][nodeIdx] = 0
+            elif nodeType == 1:
+                data['node_type'][nodeIdx] = 1
+            else:
+                data['node_type'][nodeIdx] = 2
+    
+            if nodeType == 4:
+                data['num_inverted_predecessors'][nodeIdx] = 1
+            elif nodeType == 5:
+                data['num_inverted_predecessors'][nodeIdx] = 2
+    
+            if (aigNode.hasFanin0()):
+                fanin = aigNode.fanin0()
+                edge_src_index.append(nodeIdx)
+                edge_target_index.append(fanin)
+            if (aigNode.hasFanin1()):
+                fanin = aigNode.fanin1()
+                edge_src_index.append(nodeIdx)
+                edge_target_index.append(fanin)
+    
+        data['edge_index'] = torch.tensor([edge_src_index, edge_target_index], dtype=torch.long)
+        data['node_type'] = torch.tensor(data['node_type'])
+        data['num_inverted_predecessors'] = torch.tensor(data['num_inverted_predecessors'])
+        data['nodes'] = numNodes
+    
+        return data
+        
+        
+        
+    # 读取AIG文件
+    aig_file_path = "/home/genshinmaster/yosys/alu2_0130622.aig"
+    data = read_aig(aig_file_path)
+    
+    # 查看data字典的内容
+    print(data.keys())
+    # 输出: dict_keys(['node_type', 'num_inverted_predecessors', 'edge_index', 'nodes'])
+    
+    # 获取节点类型信息
+    print(data['node_type'])
+    # 输出: tensor([0, 1, 0, ..., 2, 0, 1])
+    
+    # 获取反向前驱节点个数信息 
+    print(data['num_inverted_predecessors'])
+    # 输出: tensor([0, 1, 0, ..., 2, 0, 1])
+    
+    # 获取边信息
+    print(data['edge_index'])
+    # 输出: tensor([[0, 0, 1, 1, ...], 
+    #               [1, 2, 2, 3, ...]])
+    
+    # 获取节点数量
+    print(data['nodes'])
+    # 输出: 1234
+\end{lstlisting}
+输出如下图，这里展示了data字典的内容，节点类型，反向前驱节点个数，边index，节点数量等信息。
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{try3.png}
+    
+    \caption{}
+    \label{fig:try3}
+\end{figure}\par
+
+\subsection{最终实现}
+有了AIG获取和转换成data字典的代码，我们可以给出如下模型，进行训练。
+
+我们读取300个\.pkl文件的数据并将其划分为测试集和训练集，
+\begin{lstlisting}{language=python}
+    import os
+    import pickle
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    import numpy as np
+    from torch_geometric.nn import GCNConv
+    from torch_geometric.utils import add_self_loops
+    import abc_py
+    from sklearn.model_selection import train_test_split
+    
+    def logicSynthesis(state):
+        circuitName, actions = state.split('_')
+        circuitPath = f'/home/genshinmaster/project/InitialAIG/train/{circuitName}.aig'
+        libFile = '/home/genshinmaster/project/lib/7nm/7nm.lib'
+        logFile = f'{circuitName}.log'
+        nextState = f'/home/genshinmaster/yosys/AIGFiles/{state}.aig'
+    
+        synthesisOpToPosDic = {
+            0: "refactor",
+            1: "refactor -z",
+            2: "rewrite",
+            3: "rewrite -z",
+            4: "resub",
+            5: "resub -z",
+            6: "balance"
+        }
+    
+        action_cmd = ''
+        for digit in actions:
+            if digit.isdigit():
+                operation = int(digit)
+                if operation in synthesisOpToPosDic:
+                    action_cmd += f"{synthesisOpToPosDic[operation]}; "
+    
+        abcRunCmd = f"./yosys-abc -c \"read {circuitPath}; {action_cmd}; read_lib {libFile}; write {nextState}; print_stats\" > {logFile}"
+        os.system(abcRunCmd)
+    
+        return nextState
+    
+    def read_aig(state):
+        _abc = abc_py.AbcInterface()
+        _abc.start()
+        _abc.read(state)
+    
+        data = {}
+        numNodes = _abc.numNodes()
+        data['node_type'] = np.zeros(numNodes, dtype=int)
+        data['num_inverted_predecessors'] = np.zeros(numNodes, dtype=int)
+    
+        edge_src_index = []
+        edge_target_index = []
+    
+        for nodeIdx in range(numNodes):
+            aigNode = _abc.aigNode(nodeIdx)
+            nodeType = aigNode.nodeType()
+            data['num_inverted_predecessors'][nodeIdx] = 0
+    
+            if nodeType == 0 or nodeType == 2:
+                data['node_type'][nodeIdx] = 0
+            elif nodeType == 1:
+                data['node_type'][nodeIdx] = 1
+            else:
+                data['node_type'][nodeIdx] = 2
+    
+            if nodeType == 4:
+                data['num_inverted_predecessors'][nodeIdx] = 1
+            elif nodeType == 5:
+                data['num_inverted_predecessors'][nodeIdx] = 2
+    
+            if aigNode.hasFanin0():
+                fanin = aigNode.fanin0()
+                edge_src_index.append(nodeIdx)
+                edge_target_index.append(fanin)
+            if aigNode.hasFanin1():
+                fanin = aigNode.fanin1()
+                edge_src_index.append(nodeIdx)
+                edge_target_index.append(fanin)
+    
+        data['edge_index'] = torch.tensor([edge_src_index, edge_target_index], dtype=torch.long)
+        data['node_type'] = torch.tensor(data['node_type'])
+        data['num_inverted_predecessors'] = torch.tensor(data['num_inverted_predecessors'])
+        data['nodes'] = numNodes
+    
+        return data
+    
+    class GNNModel(nn.Module):
+        def __init__(self, in_channels, hidden_channels, out_channels):
+            super(GNNModel, self).__init__()
+            self.conv1 = GCNConv(in_channels, hidden_channels)
+            self.conv2 = GCNConv(hidden_channels, hidden_channels)
+            self.conv3 = GCNConv(hidden_channels, out_channels)
+            self.activation = nn.ReLU()
+    
+        def forward(self, x, edge_index):
+            edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+            
+            x = self.conv1(x, edge_index)
+            x = self.activation(x)
+            x = self.conv2(x, edge_index)
+            x = self.activation(x)
+            x = self.conv3(x, edge_index)
+            
+            x = torch.mean(x, dim=0)  # Compute the mean of all node outputs
+            return x.view(1)  # Ensure the output shape is [1]
+    
+    def prepare_input_data(input_data):
+        data, score = input_data
+        x = []
+        if 'node_type' in data:
+            x.append(data['node_type'].unsqueeze(1).float())
+        if 'num_inverted_predecessors' in data:
+            x.append(data['num_inverted_predecessors'].unsqueeze(1).float())
+        x = torch.cat(x, dim=1) if x else torch.zeros((data['nodes'], 0), dtype=torch.float)
+        edge_index = data['edge_index'].long()
+        score = torch.tensor(score, dtype=torch.float).view(1)  # Ensure the score shape is [1]
+    
+        # 检查 `nan` 值
+        assert not torch.isnan(x).any(), f"x contains nan: {x}"
+        assert not torch.isnan(edge_index).any(), f"edge_index contains nan: {edge_index}"
+        assert not torch.isnan(score).any(), f"score contains nan: {score}"
+        
+        return x, edge_index, score
+    
+    # 检查文件是否存在的辅助函数
+    def check_file_exists(file_path):
+        if not os.path.exists(file_path):
+            print(f"{file_path} 文件不存在")
+            return False
+        return True
+    
+    # 加载数据集
+    def load_dataset(file_prefix, range_start, range_end):
+        dataset = []
+        for i in range(range_start, range_end + 1):
+            pkl_file = f"{file_prefix}_{i}.pkl"
+            pkl_path = os.path.join('/home/genshinmaster/project/project_data', pkl_file)
+            if check_file_exists(pkl_path):
+                with open(pkl_path, 'rb') as file:
+                    data = pickle.load(file)
+                    input_list = data['input']
+                    score_list = data['target']
+                    for j in range(1, len(input_list)):
+                        state = input_list[j]
+                        nextstate = logicSynthesis(state)
+                        data = read_aig(nextstate)
+                        input_data = (data, score_list[j])
+                        dataset.append(input_data)
+        return dataset
+    
+    # 加载 adder, alu2 和 apex3 数据集
+    print("begin load data1")
+    train_dataset = load_dataset('adder', 0, 100)
+    print("begin load data2")
+    train_dataset += load_dataset('alu2', 0, 100)
+    print("begin load data3")
+    train_dataset += load_dataset('apex3', 0, 100)
+    # 使用train_test_split划分训练集和测试集
+    train_dataset, test_dataset = train_test_split(train_dataset, test_size=0.2, random_state=42)
+    
+    # 确保训练集和测试集不为空
+    if not train_dataset:
+        print("训练集为空，请检查数据文件。")
+    if not test_dataset:
+        print("测试集为空，请检查数据文件。")
+    
+    num_features = 2  # node_type and num_inverted_predecessors
+    model = GNNModel(in_channels=num_features, hidden_channels=64, out_channels=1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
+    # 训练模型
+    for epoch in range(100):
+        model.train()
+        for input_data in train_dataset:
+            optimizer.zero_grad()
+            x, edge_index, score = prepare_input_data(input_data)
+            output = model(x, edge_index)
+            loss = F.mse_loss(output, score)  # Ensure output and score are both [1]
+            print(f"训练损失: {loss.item()}")  # 打印训练损失以便调试
+            loss.backward()
+            optimizer.step()
+    
+    # 评估模型
+    print("finish train")
+    model.eval()
+    with torch.no_grad():
+        test_predictions = []
+        test_targets = []
+    
+        for input_data in test_dataset:
+            x, edge_index, score = prepare_input_data(input_data)
+            
+            # 打印输入数据以便调试
+            print(f"x: {x}")
+            print(f"edge_index: {edge_index}")
+            print(f"score: {score}")
+            
+            output = model(x, edge_index)
+            
+            # 确保输出没有 `nan` 值
+            assert not torch.isnan(output).any(), f"output contains nan: {output}"
+            
+            # 打印模型输出和目标值
+            print(f"模型输出: {output.item()}, 目标值: {score.item()}")
+            
+            test_predictions.append(output.item())
+            test_targets.append(score.item())
+    
+        test_predictions = torch.tensor(test_predictions)
+        test_targets = torch.tensor(test_targets)
+        assert not torch.isnan(test_predictions).any(), f"test_predictions contains nan: {test_predictions}"
+        assert not torch.isnan(test_targets).any(), f"test_targets contains nan: {test_targets}"
+    
+        mse = F.mse_loss(test_predictions, test_targets)
+        print(f"Test MSE: {mse.item()}")
+    
+\end{lstlisting}
+输出结果如下图，TEST MSE接近于0，说明模型的效果很好
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{datapre.png}
+    
+    \caption{}
+    \label{fig:datapre}
+\end{figure}\par
+
+
+
+\section{任务2：逻辑综合决策}
+\subsection{FutureRewardModel}
+由已知，我们需要训练一个model用于处理futureReward，代码如下所示
+\begin{lstlisting}{language=python}
+    import os
+    import pickle
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    import numpy as np
+    from torch.utils.data import Dataset, DataLoader
+    from sklearn.model_selection import train_test_split
+    import itertools
+    
+    # 数据集加载函数
+    def load_dataset(file_prefix, range_start, range_end):
+        dataset = []
+        for i in range(range_start, range_end + 1):
+            pkl_file = f"{file_prefix}_{i}.pkl"
+            pkl_path = os.path.join('/home/genshinmaster/project/project_data', pkl_file)
+            if os.path.exists(pkl_path):
+                with open(pkl_path, 'rb') as file:
+                    data = pickle.load(file)
+                    input_list = data['input']
+                    target_list = data['target']
+                    for j in range(len(input_list)):
+                        state = input_list[j]
+                        expected_future_reward = target_list[j]
+                        dataset.append((state, expected_future_reward))
+        return dataset
+    
+    # 加载 adder, alu2 数据集
+    adder_dataset = load_dataset('adder', 0, 100)
+    alu2_dataset = load_dataset('alu2', 0, 100)
+    
+    # 将数据集合并
+    full_dataset = adder_dataset + alu2_dataset
+    
+    # 划分训练集和验证集
+    train_dataset, val_dataset = train_test_split(full_dataset, test_size=0.2, random_state=42)
+    
+    
+    class AIGDataset(Dataset):
+        def __init__(self, data):
+            self.data = data
+    
+        def __len__(self):
+            return len(self.data)
+    
+        def __getitem__(self, idx):
+            state, future_reward = self.data[idx]
+            features = process_state(state)
+            return features.float(), torch.tensor(future_reward).float()
+    
+    
+    
+    def process_state(state):
+        char_set = 'abcdefghijklmnopqrstuvwxyz0123456789_'  # 字符集合，包括字母、数字和下划线
+        num_chars = len(char_set)
+        max_length = 10  # 假设状态的最大长度为10
+    
+        features = torch.zeros(max_length, num_chars)
+    
+        for i, char in enumerate(state[:max_length]):
+            if char in char_set:
+                features[i, char_set.index(char)] = 1
+    
+        features_flat = features.view(-1)
+    
+        return features_flat
+    
+    
+    class FutureRewardModel(nn.Module):
+        def __init__(self, input_dim, hidden_size, output_size):
+            super(FutureRewardModel, self).__init__()
+            self.fc1 = nn.Linear(input_dim, hidden_size)
+            self.fc2 = nn.Linear(hidden_size, output_size)  # 输出预期未来奖励值
+            self.activation = nn.ReLU()
+    
+        def forward(self, x):
+            x = self.activation(self.fc1(x))
+            x = self.fc2(x)
+            return x
+    
+    
+    # 参数设置
+    input_dim = 370  # 根据状态的特征向量长度调整
+    hidden_dim = 64
+    batch_size = 32
+    num_epochs = 50
+    learning_rate = 0.001
+    
+    # 准备数据集和数据加载器
+    train_dataset = AIGDataset(train_dataset)
+    val_dataset = AIGDataset(val_dataset)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    
+    # 初始化模型和优化器
+    model = FutureRewardModel(input_dim, hidden_dim, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
+    
+    # 训练循环
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+        for inputs, targets in train_loader:
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, targets.unsqueeze(1))  # 使用 MSE 损失
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * inputs.size(0)
+        
+        # 计算验证集损失
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                outputs = model(inputs)
+                loss = criterion(outputs, targets.unsqueeze(1))
+                val_loss += loss.item() * inputs.size(0)
+        
+        train_loss /= len(train_loader.dataset)
+        val_loss /= len(val_loader.dataset)
+        
+        print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+    
+    # 保存训练好的模型
+    torch.save(model.state_dict(), '/home/genshinmaster/project/future_reward_model.pth')
+    
+\end{lstlisting}
+代码运行结果如下,可以看到loss逐渐减小，说明模型训练较为合理
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{futureReward.png}
+    
+    \caption{}
+    \label{fig:futureReward}
+\end{figure}\par
+\subsection{搜索算法实现}
+基于训练好的两个模型，对于给定名称的alu2这样的aig，我们可以遍历可能的形如alu2\_4213231之类的state，
+可以使用FutureRewardModel来给出预测评分，最终取最优的即可
+代码如下所示：
+\begin{lstlisting}{language=python}
+    import os
+    import pickle
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+    import numpy as np
+    from torch.utils.data import Dataset, DataLoader
+    from sklearn.model_selection import train_test_split
+    import itertools
+    
+    
+    
+    class AIGDataset(Dataset):
+        def __init__(self, data):
+            self.data = data
+    
+        def __len__(self):
+            return len(self.data)
+    
+        def __getitem__(self, idx):
+            state, future_reward = self.data[idx]
+            features = process_state(state)
+            return features.float(), torch.tensor(future_reward).float()
+    
+    
+    
+    def process_state(state):
+        char_set = 'abcdefghijklmnopqrstuvwxyz0123456789_'  # 字符集合，包括字母、数字和下划线
+        num_chars = len(char_set)
+        max_length = 10  # 假设状态的最大长度为10
+    
+        features = torch.zeros(max_length, num_chars)
+    
+        for i, char in enumerate(state[:max_length]):
+            if char in char_set:
+                features[i, char_set.index(char)] = 1
+    
+        features_flat = features.view(-1)
+    
+        return features_flat
+    
+    
+    class FutureRewardModel(nn.Module):
+        def __init__(self, input_dim, hidden_size, output_size):
+            super(FutureRewardModel, self).__init__()
+            self.fc1 = nn.Linear(input_dim, hidden_size)
+            self.fc2 = nn.Linear(hidden_size, output_size)  # 输出预期未来奖励值
+            self.activation = nn.ReLU()
+    
+        def forward(self, x):
+            x = self.activation(self.fc1(x))
+            x = self.fc2(x)
+            return x
+    
+    
+    # 参数设置
+    input_dim = 370  # 根据状态的特征向量长度调整
+    hidden_dim = 64
+    batch_size = 32
+    num_epochs = 50
+    learning_rate = 0.001
+    
+    
+    
+    
+    # 初始化模型和优化器
+    model = FutureRewardModel(input_dim, hidden_dim, 1)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = nn.MSELoss()
+    
+    # 加载已训练好的模型参数
+    model_path = '/home/genshinmaster/project/future_reward_model.pth'
+    model.load_state_dict(torch.load(model_path))
+    
+    
+    # 定义动作空间生成函数
+    def generate_actions(prefix='alu2_', max_digits=10, digit_range=range(7), max_actions=None):
+        actions = []
+        num_actions = 0  # 记录已生成的动作数量
+        print("generate_actions")
+        
+        for num_digits in range(1, max_digits + 1):
+            if max_actions is not None and num_actions >= max_actions:
+                break
+            
+            for combo in itertools.product(digit_range, repeat=num_digits):
+                if max_actions is not None and num_actions >= max_actions:
+                    break
+                
+                action = prefix + ''.join(map(str, combo))
+                actions.append(action)
+                num_actions += 1
+        
+        return actions
+    
+    # 生成动作空间，限制最多生成max_actions 个state
+    max_actions = 100
+    actions = generate_actions(prefix='alu2_', max_digits=10, digit_range=range(7), max_actions=max_actions)
+    
+    
+    
+    
+    # 使用贪婪搜索来选择最优动作
+    def greedy_search(actions, model):
+        best_action = None
+        best_score = float('-inf')
+        
+        for action in actions:
+            # 将动作转换为特征表示
+            action_features = process_state(action)
+            
+            # 将特征表示转换为模型期望的输入形式（添加批次维度）
+            action_features = action_features.unsqueeze(0)
+            
+            # 使用评分模型评估每个动作的评分
+            action_score = model(action_features).item()
+            
+            # 更新最优动作和评分
+            if action_score > best_score:
+                best_action = action
+                best_score = action_score
+        
+        return best_action, best_score
+    
+    best_action, best_score = greedy_search(actions, model)
+    print(f"Best Action: {best_action}, Best Score: {best_score:.4f}")
+\end{lstlisting}
+
+
+我们分别将max\_actions设置为100，1000，10000，100000,得到的结果如下，可以看出解空间越大，对应的最终结果就越好。
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{search1.png}
+    
+    \caption{}
+    \label{fig:search}
+\end{figure}\par
+
+
+
+
+
+
+
+
+\end{document}
+
